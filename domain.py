@@ -40,19 +40,11 @@ def normalize_code(code: str) -> str:
 
 
 @dataclass
-class CarrierEvent:
-    """Evento como o adapter entrega: já traduzido, mas com o bruto anexado."""
+class TrackingEvent:
+    """Um fato de rastreio: id para dedup, bruto para auditoria,
+    normalizado para a regra, instante para ordenação."""
 
     event_id: str | None
-    status_raw: str
-    normalized: NormalizedStatus
-    occurred_at: datetime
-    carrier: str
-
-
-@dataclass
-class HistoryEntry:
-    event_id: str
     status_raw: str
     normalized: NormalizedStatus
     occurred_at: datetime
@@ -66,19 +58,21 @@ class Shipment:
     created_at: datetime
     status: NormalizedStatus = NormalizedStatus.POSTADO
     last_valid_status: NormalizedStatus | None = None
-    history: list[HistoryEntry] = field(default_factory=list)
+    history: list[TrackingEvent] = field(default_factory=list)
     t0: datetime | None = None
     delivered_at: datetime | None = None
     delayed: bool = False
     stale: bool = False
 
 
-def dedup_key(event_id: str | None, status_raw: str, occurred_at: datetime, carrier: str) -> str:
-    if event_id:
-        return event_id
+def dedup_key(event: TrackingEvent) -> str:
+    if event.event_id:
+        return event.event_id
     # shortcut: sem id do agregador, colapsa por conteúdo; dois eventos reais
     # idênticos no mesmo instante são indistinguíveis — upgrade: exigir id.
-    digest = sha1(f"{carrier}|{status_raw}|{occurred_at.isoformat()}".encode()).hexdigest()[:16]
+    digest = sha1(
+        f"{event.carrier}|{event.status_raw}|{event.occurred_at.isoformat()}".encode()
+    ).hexdigest()[:16]
     return f"hash:{digest}"
 
 
@@ -86,27 +80,20 @@ def _utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def apply_events(shipment: Shipment, events: list[CarrierEvent], now: datetime) -> None:
+def apply_events(shipment: Shipment, events: list[TrackingEvent], now: datetime) -> None:
     """Funde eventos (deduplicando) e recalcula status/t0/delayed do zero.
 
-    Recalcular do zero a partir do histórico ordenado torna a Monotonicidade
+    Recalcular do zero a partir do histórico ordenado torna a monotonicidade
     barata: evento antigo fora de ordem nunca regride, por construção.
     """
-    known = {e.event_id for e in shipment.history}
-    for ev in events:
-        key = dedup_key(ev.event_id, ev.status_raw, ev.occurred_at, ev.carrier)
+    known = {dedup_key(e) for e in shipment.history}
+    for event in events:
+        event.occurred_at = _utc(event.occurred_at)
+        key = dedup_key(event)
         if key in known:
             continue
         known.add(key)
-        shipment.history.append(
-            HistoryEntry(
-                event_id=key,
-                status_raw=ev.status_raw,
-                normalized=ev.normalized,
-                occurred_at=_utc(ev.occurred_at),
-                carrier=ev.carrier,
-            )
-        )
+        shipment.history.append(event)
     shipment.history.sort(key=lambda e: e.occurred_at)
     _recompute(shipment, _utc(now))
 
@@ -115,7 +102,7 @@ def _recompute(shipment: Shipment, now: datetime) -> None:
     if not shipment.history:
         shipment.status = NormalizedStatus.POSTADO
         shipment.last_valid_status = None
-        shipment.t0 = shipment.created_at
+        shipment.t0 = _utc(shipment.created_at)
         shipment.delivered_at = None
         shipment.delayed = False
         return
@@ -138,7 +125,7 @@ def _recompute(shipment: Shipment, now: datetime) -> None:
             status = NormalizedStatus.EXCECAO
             continue
         rank = RANK[entry.normalized]
-        if rank >= valid_rank:
+        if rank > valid_rank:
             valid_rank = rank
             status = entry.normalized
             last_valid = entry.normalized

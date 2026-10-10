@@ -1,14 +1,17 @@
 """Portas: relógio, repositório e o agregador atrás de interface.
 
-O mapa raw -> normalizado mora aqui, no adapter. O service/domínio só
-recebe NormalizedStatus: trocar o agregador = implementar TrackingProvider.
+O cliente HTTP fala com o agregador fictício; o mapa raw -> normalizado mora
+aqui, no adapter. O service/domínio só recebe NormalizedStatus: trocar o
+agregador = implementar TrackingProvider.
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Protocol
 
-from domain import CarrierEvent, NormalizedStatus, Shipment
+import httpx
+
+from domain import NormalizedStatus, Shipment, TrackingEvent
 
 
 class Clock(Protocol):
@@ -46,44 +49,40 @@ class ProviderError(Exception):
 
 
 class TrackingProvider(Protocol):
-    def fetch_events(self, code: str) -> list[CarrierEvent]: ...
+    def fetch_events(self, code: str) -> list[TrackingEvent]: ...
 
 
-class _MemoryProviderBase:
-    """Fake HTTP-like do agregador fictício: guarda eventos por código,
-    pode devolver repetidos/fora de ordem e pode falhar sob demanda."""
+class HttpTrackingProvider:
+    """Cliente HTTP do agregador; cada dialeto é uma subclasse com seu mapa."""
 
-    carrier = "fake"
+    carrier = "agregador-fake"
     mapping: dict[str, NormalizedStatus] = {}
 
-    def __init__(self):
-        self._events: dict[str, list[CarrierEvent]] = {}
-        self._failures: set[str] = set()
-        self.fail_all = False
+    def __init__(self, base_url: str, timeout: float = 2.0):
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
 
-    def seed(self, code: str, raws: list[tuple[str | None, str, datetime]]) -> None:
-        self._events[code.upper()] = [self._translate(eid, raw, at) for eid, raw, at in raws]
+    def fetch_events(self, code: str) -> list[TrackingEvent]:
+        try:
+            response = httpx.get(f"{self.base_url}/track/{code}", timeout=self.timeout)
+        except httpx.HTTPError as exc:
+            raise ProviderError(f"aggregator unreachable: {exc}") from exc
+        if response.status_code != 200:
+            raise ProviderError(f"aggregator failed with {response.status_code}")
+        return [self._translate(item) for item in response.json()["events"]]
 
-    def fail_for(self, code: str) -> None:
-        self._failures.add(code.upper())
-
-    def fetch_events(self, code: str) -> list[CarrierEvent]:
-        code = code.upper()
-        if self.fail_all or code in self._failures:
-            raise ProviderError(f"aggregator unavailable for {code}")
-        return list(self._events.get(code, []))
-
-    def _translate(self, event_id: str | None, raw: str, at: datetime) -> CarrierEvent:
-        return CarrierEvent(
-            event_id=event_id,
-            status_raw=raw,
-            normalized=self.mapping.get(raw.strip().upper(), NormalizedStatus.EXCECAO),
+    def _translate(self, item: dict) -> TrackingEvent:
+        at = datetime.fromisoformat(item["occurred_at"])
+        return TrackingEvent(
+            event_id=item["id"],
+            status_raw=item["status_raw"],
+            normalized=self.mapping.get(item["status_raw"].strip().upper(), NormalizedStatus.EXCECAO),
             occurred_at=at if at.tzinfo else at.replace(tzinfo=timezone.utc),
-            carrier=self.carrier,
+            carrier=item.get("carrier", self.carrier),
         )
 
 
-class FakeAggregadorProvider(_MemoryProviderBase):
+class FakeAggregadorProvider(HttpTrackingProvider):
     """Dialeto A do agregador fictício."""
 
     carrier = "agregador-fake"
@@ -96,7 +95,7 @@ class FakeAggregadorProvider(_MemoryProviderBase):
     }
 
 
-class CarrierXProvider(_MemoryProviderBase):
+class CarrierXProvider(HttpTrackingProvider):
     """Dialeto B: prova de que o agregador é trocável (mesmo contrato)."""
 
     carrier = "carrier-x"

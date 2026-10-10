@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 
-from domain import NormalizedStatus, Shipment, apply_events, normalize_code
+from domain import Shipment, TrackingEvent, apply_events, normalize_code
 from provider import (
     FakeAggregadorProvider,
     ProviderError,
@@ -15,12 +15,15 @@ from provider import (
     SystemClock,
 )
 
-DEFAULT_SLA_HOURS = float(os.getenv("TRANSIT_SLA_HOURS", "72"))
+
+def default_sla() -> float:
+    return float(os.getenv("TRANSIT_SLA_HOURS", "72"))
+
 
 app = FastAPI(title="Conty — Rastreio do produto ao criador")
 
 repo = ShipmentRepository()
-provider = FakeAggregadorProvider()
+provider = FakeAggregadorProvider(os.getenv("FAKE_BASE_URL", "http://127.0.0.1:8100"))
 clock = SystemClock()
 
 
@@ -43,25 +46,26 @@ class ShipmentIn(BaseModel):
         return v
 
 
-def _payload(s: Shipment) -> dict:
+def _event_payload(entry: TrackingEvent) -> dict:
     return {
-        "code": s.code,
-        "status": s.status.value,
-        "last_valid_status": s.last_valid_status.value if s.last_valid_status else None,
-        "delayed": s.delayed,
-        "stale": s.stale,
-        "t0": s.t0.isoformat() if s.t0 else None,
-        "sla_hours": s.sla_hours,
-        "history": [
-            {
-                "event_id": e.event_id,
-                "status_raw": e.status_raw,
-                "normalized": e.normalized.value,
-                "occurred_at": e.occurred_at.isoformat(),
-                "carrier": e.carrier,
-            }
-            for e in s.history
-        ],
+        "event_id": entry.event_id,
+        "status_raw": entry.status_raw,
+        "normalized": entry.normalized.value,
+        "occurred_at": entry.occurred_at.isoformat(),
+        "carrier": entry.carrier,
+    }
+
+
+def _payload(shipment: Shipment) -> dict:
+    return {
+        "code": shipment.code,
+        "status": shipment.status.value,
+        "last_valid_status": shipment.last_valid_status.value if shipment.last_valid_status else None,
+        "delayed": shipment.delayed,
+        "stale": shipment.stale,
+        "t0": shipment.t0.isoformat() if shipment.t0 else None,
+        "sla_hours": shipment.sla_hours,
+        "history": [_event_payload(entry) for entry in shipment.history],
     }
 
 
@@ -89,7 +93,7 @@ def create_shipment(body: ShipmentIn):
         return JSONResponse(status_code=200, content=_payload(existing))
     shipment = Shipment(
         code=code,
-        sla_hours=body.sla_hours or DEFAULT_SLA_HOURS,
+        sla_hours=body.sla_hours or default_sla(),
         created_at=clock.now(),
     )
     repo.save(shipment)
@@ -111,19 +115,7 @@ def get_events(code: str):
     shipment = repo.get(normalize_code(code))
     if shipment is None:
         raise HTTPException(status_code=404, detail="código não cadastrado")
-    return {
-        "code": shipment.code,
-        "events": [
-            {
-                "event_id": e.event_id,
-                "status_raw": e.status_raw,
-                "normalized": e.normalized.value,
-                "occurred_at": e.occurred_at.isoformat(),
-                "carrier": e.carrier,
-            }
-            for e in shipment.history
-        ],
-    }
+    return {"code": shipment.code, "events": [_event_payload(e) for e in shipment.history]}
 
 
 @app.get("/health")

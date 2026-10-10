@@ -1,30 +1,11 @@
 """Ticket 03: status inventado vira exceção, destrava e entregue é terminal."""
-import os
-import sys
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
-import pytest
-from fastapi.testclient import TestClient
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import app as appmod
-from provider import FakeAggregadorProvider, FixedClock, ShipmentRepository
-
-T0 = datetime(2026, 1, 5, 12, 0, tzinfo=timezone.utc)
+from .conftest import T0
 
 
-@pytest.fixture
-def ctx():
-    appmod.repo = ShipmentRepository()
-    appmod.provider = FakeAggregadorProvider()
-    appmod.clock = FixedClock(T0)
-    return TestClient(appmod.app), appmod.provider
-
-
-def test_unknown_carrier_status_becomes_exception_not_delivered(ctx):
-    client, provider = ctx
-    provider.seed(
+def test_unknown_carrier_status_becomes_exception_not_delivered(client, fake):
+    fake.store.seed(
         "EX1",
         [("e1", "POSTED", T0 - timedelta(hours=9)), ("e9", "ZBLORP_INVENTADO", T0 - timedelta(hours=2))],
     )
@@ -34,12 +15,13 @@ def test_unknown_carrier_status_becomes_exception_not_delivered(ctx):
     assert body["history"][-1]["status_raw"] == "ZBLORP_INVENTADO"
 
 
-def test_valid_event_unlocks_exception(ctx):
-    client, provider = ctx
-    provider.seed("EX2", [("e1", "POSTED", T0 - timedelta(hours=9)), ("e9", "ZBLORP", T0 - timedelta(hours=4))])
+def test_valid_event_unlocks_exception(client, fake):
+    fake.store.seed(
+        "EX2", [("e1", "POSTED", T0 - timedelta(hours=9)), ("e9", "ZBLORP", T0 - timedelta(hours=4))]
+    )
     assert client.post("/shipments", json={"code": "EX2"}).json()["status"] == "excecao"
 
-    provider.seed(
+    fake.store.seed(
         "EX2",
         [
             ("e1", "POSTED", T0 - timedelta(hours=9)),
@@ -51,9 +33,8 @@ def test_valid_event_unlocks_exception(ctx):
     assert body["status"] == "em_transito"
 
 
-def test_post_delivery_events_are_audited_but_status_stays(ctx):
-    client, provider = ctx
-    provider.seed(
+def test_post_delivery_events_are_audited_but_status_stays(client, fake):
+    fake.store.seed(
         "EX3",
         [
             ("e1", "POSTED", T0 - timedelta(hours=30)),
