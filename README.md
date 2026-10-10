@@ -1,31 +1,50 @@
-# Conty — Rastreio do produto enviado ao criador
+# Conty. Rastreio do produto ao criador
 
-API que acompanha o pacote físico até a mão do criador e responde: **chegou? atrasou?**
-Traduz qualquer dialeto da transportadora (via agregador) para 5 estados estáveis.
+API que acompanha o pacote físico até a mão do criador e responde **chegou? atrasou?** Cada transportadora fala um dialeto; o agregador traduz tudo para 5 estados estáveis (`postado`, `em_transito`, `saiu_para_entrega`, `entregue`, `excecao`), com atraso medido contra um SLA em horas.
 
-## Rodar
+## Regras principais
+
+- Progresso monotônico `postado < em_transito < saiu_para_entrega < entregue`: evento antigo que chega depois não regride; `entregue` trava o status (o histórico continua auditando).
+- Status desconhecido vira `excecao` — nunca `entregue` — preservando `last_valid_status`; um evento válido posterior destrava.
+- Reconsulta não duplica: dedup por `event_id` (fallback hash de `carrier|raw|occurred_at`); histórico sempre ordenado por `occurred_at`.
+- `delayed` só em curso com `agora − t0 > SLA`; `excecao` sozinha nunca atrasa; `entregue` congela `delivered_at − t0 > SLA`. `t0` = primeiro `postado` → menor `occurred_at` → cadastro.
+- Agregador fora = `200` com `stale: true` e último estado; o mapa `raw → normalizado` mora só no adapter.
+
+## Como rodar
+
+Runtime: Python 3.14, `venv`, sem banco.
 
 ```bash
-python -m venv .venv && .venv/bin/pip install -r requirements.txt
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python fake_server.py --port 8100 &   # agregador fictício
 TRANSIT_SLA_HOURS=72 FAKE_BASE_URL=http://127.0.0.1:8100 .venv/bin/uvicorn app:app --port 8000
-.venv/bin/python -m pytest tests/ -q
+.venv/bin/python -m pytest tests/ -q   # 21 testes; o fake HTTP sobe sozinho
 ```
 
-## Endpoints
+Fluxo copiável (com o fake e a API no ar):
 
-| Método | Rota | Resposta |
-|---|---|---|
-| POST | `/shipments` `{"code": "AB123", "sla_hours": 48}` | 201 (novo) / 200 (duplicata idempotente) |
-| GET | `/shipments/{code}` | estado + `delayed` + `history` |
-| GET | `/shipments/{code}/events` | bruto × normalizado lado a lado |
+```bash
+curl -X POST localhost:8000/shipments -H 'Content-Type: application/json' -d '{"code":"AB123"}'
+curl localhost:8000/shipments/AB123
+curl localhost:8000/shipments/AB123/events
+```
 
-`GET /shipments/{code}` retorna `{code, status, last_valid_status, delayed, stale, t0, sla_hours, history[]}`.
-Código inexistente local = 404; agregador fora = 200 com `stale: true` e último estado.
+Sem seed fixo: os testes semeiam o fake via `Store.seed`. Os testes descrevem o comportamento esperado.
 
-## Exemplo: payload bruto → status normalizado
+## Contrato da API
 
-O agregador entrega isto (repetido, fora de ordem, com dialeto próprio):
+| Método | Rota | Sucesso | Erros |
+|---|---|---|---|
+| POST | `/shipments` `{"code": "AB123", "sla_hours": 48}` (`sla_hours` opcional) | `201` novo, `200` duplicata idempotente (mantém o SLA original) | `422` `code` vazio ou `sla_hours <= 0` |
+| GET | `/shipments/{code}` | `200` `{code, status, last_valid_status, delayed, stale, t0, sla_hours, history[]}` | `404` código não cadastrado |
+| GET | `/shipments/{code}/events` | `200` `{code, events[]}` com bruto × normalizado | `404` código não cadastrado |
+| GET | `/health` | `200` `{"ok": true}` | — |
+
+Precedência de erros: `404` (código inexistente local) > `422` (validação) > `200` com `stale: true` (agregador fora/timeout/500 — degrada, não quebra). `code` com strip + case-insensitive (`" ab123 "` = `"AB123"`).
+
+## Exemplos
+
+Sucesso com sujeira da transportadora — o agregador entrega (repetido, fora de ordem, dialeto próprio):
 
 ```json
 [
@@ -36,7 +55,7 @@ O agregador entrega isto (repetido, fora de ordem, com dialeto próprio):
 ]
 ```
 
-A API responde isto (`GET /shipments/AB123`):
+`GET /shipments/AB123` responde:
 
 ```json
 {
@@ -53,41 +72,32 @@ A API responde isto (`GET /shipments/AB123`):
 }
 ```
 
-Regras: `ZBLORP_INVENTADO` (desconhecido) vira `excecao`, nunca `entregue`;
-o `IN_TRANSIT` repetido entra 1 vez; o histórico ordena por `occurred_at`.
+O repetido entra 1 vez; o desconhecido vira `excecao`, nunca `entregue`.
 
-## Como o atraso é detectado (sem marcar entrega normal como atraso)
+Erro — código nunca cadastrado:
 
-- `t0` = `occurred_at` do primeiro `postado`; se o código foi cadastrado já em
-  trânsito, o menor `occurred_at` conhecido; se zero eventos, o cadastro.
-- Em curso (`postado`, `em_transito`, `saiu_para_entrega`):
-  `delayed = agora − t0 > SLA` (SLA global via `TRANSIT_SLA_HOURS`, default 72h,
-  com override por código).
-- `excecao` sozinha **nunca** marca atraso (evita duplo alerta).
-- `entregue` **congela** o veredito: `delayed = delivered_at − t0 > SLA`.
-  Entrega no prazo = `false` mesmo que o SLA tenha estourado no meio do caminho.
-
-## Testes
-
-```bash
-.venv/bin/python -m pytest tests/ -q   # 21 testes, fake HTTP sobe sozinho
+```
+GET /shipments/NOPE → 404 {"detail": "código não cadastrado"}
 ```
 
-- `test_02`: lote fora de ordem não regride; reconsulta não duplica.
-- `test_03`: status inventado vira exceção (nunca entregue) + destravamento.
-- `test_04`: atraso com relógio fixo (estourado / no prazo / entregue-atrasada / exceção / cadastro tardio).
-- `test_05`: agregador fora degrada com `stale`; 2º dialeto passa no mesmo contrato.
+Degradação — agregador fora do ar, último estado preservado:
 
-## Arquitetura
+```json
+{"code": "AB123", "status": "em_transito", "delayed": false, "stale": true, "history": []}
+```
 
-`API → Service → TrackingProvider (interface) → cliente HTTP`.
-O fake (`fake_server.py`) é HTTP de verdade; o mapa `raw → normalizado` mora
-**só** no adapter (`provider.py`): trocar o agregador = implementar
-`fetch_events` (há 2 dialetos com o mesmo contrato, `test_05`). Relógio e
-repositório (em memória) também são portas, para data controlada e troca de persistência.
+## Fora de escopo
 
-## Nota de IA (exigida pelo enunciado)
+Sem banco durável (repositório em memória atrás de interface), sem auth, sem webhook/push ("avisar" = campo `delayed`), sem UI, sem concorrência com locks, sem múltiplos agregadores simultâneos.
 
-- **Feito com IA:** esqueleto da API, máquina de estado, adapters e testes.
-- **Revisado por humano:** regra de atraso (congelamento da entregue),
-  semântica de exceção (exibir + preservar último válido) e este README.
+## Uso de IA
+
+### Feito com IA
+
+Esqueleto da API, máquina de estado monotônica, cliente HTTP + 2 dialetos, fake HTTP e os 21 testes.
+
+### Revisado por humano
+
+Regra de atraso (congelamento da entregue), semântica de exceção (exibir + preservar último válido), degradação `stale` e este README. Comandos rodados: `pytest tests/ -q` (21 passed).
+
+O contrato é este README e os testes.
