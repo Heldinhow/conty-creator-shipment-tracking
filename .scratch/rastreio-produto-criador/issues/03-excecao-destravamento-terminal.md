@@ -4,7 +4,9 @@
 
 **Blocked by:** 02 (Tradução monotônica + dedup + fora de ordem).
 
-**Status:** ready-for-agent
+**Status:** resolved
+
+**Resolution:** done on integration/rastreio-produto (948a508), 19 testes verdes
 
 - [ ] raw desconhecido → status exibido `excecao`, preservando last_valid_status + rank; bruto vai ao histórico
 - [ ] Evento válido com rank ≥ preservado destrava a exceção para o válido

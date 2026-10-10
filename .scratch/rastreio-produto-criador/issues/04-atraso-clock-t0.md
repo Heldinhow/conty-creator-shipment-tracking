@@ -4,7 +4,9 @@
 
 **Blocked by:** 02 (Tradução monotônica + dedup + fora de ordem).
 
-**Status:** ready-for-agent
+**Status:** resolved
+
+**Resolution:** done on integration/rastreio-produto (948a508), 19 testes verdes
 
 - [ ] delayed só para postado / em trânsito / saiu para entrega com now(clock) − t0 > sla
 - [ ] t0 em cascata: occurred_at do 1º postado → menor occurred_at conhecido → created_at local provisório

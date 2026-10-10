@@ -4,7 +4,9 @@
 
 **Blocked by:** 01 (Esqueleto — cadastro idempotente + consulta base).
 
-**Status:** ready-for-agent
+**Status:** resolved
+
+**Resolution:** done on integration/rastreio-produto (948a508), 19 testes verdes
 
 - [ ] Mapa raw→normalizado confinado no adapter HTTP; service só recebe o enum estável
 - [ ] Rank postado < em trânsito < saiu para entrega < entregue; evento com rank menor/igual não move o status

@@ -4,7 +4,9 @@
 
 **Blocked by:** 03 (Exceção), 04 (Atraso com clock fixo).
 
-**Status:** ready-for-agent
+**Status:** resolved
+
+**Resolution:** done on integration/rastreio-produto (948a508), 19 testes verdes
 
 - [ ] Agregador fora/timeout/500 ou código inexistente lá → 200 com último estado + stale:true (só local inexistente dá 404)
 - [ ] Segundo adapter com dialeto distinto passa no mesmo teste de contrato sem tocar no domínio/service

@@ -4,7 +4,9 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** resolved
+
+**Resolution:** done on integration/rastreio-produto (948a508), 19 testes verdes
 
 - [ ] POST /shipments com `{code, sla_hours?}` cria e retorna estado inicial (sync imediato no agregador)
 - [ ] Re-POST do mesmo code retorna 200 idempotente sem duplicar nem sobrescrever SLA
