@@ -69,14 +69,29 @@ class HttpTrackingProvider:
             raise ProviderError(f"aggregator unreachable: {exc}") from exc
         if response.status_code != 200:
             raise ProviderError(f"aggregator failed with {response.status_code}")
-        return [self._translate(item) for item in response.json()["events"]]
+        try:
+            items = response.json()["events"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ProviderError(f"aggregator returned malformed payload: {exc}") from exc
+        if not isinstance(items, list):
+            raise ProviderError("aggregator returned malformed payload: events is not a list")
+        return [self._translate(item) for item in items]
 
     def _translate(self, item: dict) -> TrackingEvent:
-        at = datetime.fromisoformat(item["occurred_at"])
+        try:
+            raw = item["status_raw"]
+            at = datetime.fromisoformat(item["occurred_at"])
+            event_id = item["id"]
+        except (KeyError, TypeError, ValueError) as exc:
+            # Payload fora do formato degrada para stale em vez de 500:
+            # _synchronize só conhece ProviderError.
+            raise ProviderError(f"aggregator returned malformed event: {exc}") from exc
+        if not isinstance(raw, str):
+            raise ProviderError(f"aggregator returned malformed event: status_raw={raw!r}")
         return TrackingEvent(
-            event_id=item["id"],
-            status_raw=item["status_raw"],
-            normalized=self.mapping.get(item["status_raw"].strip().upper(), NormalizedStatus.EXCECAO),
+            event_id=event_id,
+            status_raw=raw,
+            normalized=self.mapping.get(raw.strip().upper(), NormalizedStatus.EXCECAO),
             occurred_at=at if at.tzinfo else at.replace(tzinfo=timezone.utc),
             carrier=item.get("carrier", self.carrier),
         )
